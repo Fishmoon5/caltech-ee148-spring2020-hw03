@@ -7,6 +7,7 @@ import torch.optim as optim
 from torchvision import datasets, transforms
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data.sampler import SubsetRandomSampler
+import numpy as np
 
 import os
 
@@ -103,7 +104,8 @@ def train(args, model, device, train_loader, optimizer, epoch):
         optimizer.step()                    # Perform a single optimization step
         if batch_idx % args.log_interval == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                epoch, batch_idx * len(data), len(train_loader.dataset),
+                # epoch, batch_idx * len(data), len(train_loader.dataset),
+                epoch, batch_idx * len(data), len(train_loader) * len(data),
                 100. * batch_idx / len(train_loader), loss.item()))
 
 
@@ -173,7 +175,7 @@ def main():
         model = fcNet().to(device)
         model.load_state_dict(torch.load(args.load_model))
 
-        test_dataset = datasets.MNIST('../data', train=False,
+        test_dataset = datasets.MNIST('./data', train=False,
                     transform=transforms.Compose([
                         transforms.ToTensor(),
                         transforms.Normalize((0.1307,), (0.3081,))
@@ -187,30 +189,70 @@ def main():
         return
 
     # Pytorch has default MNIST dataloader which loads data at each iteration
-    train_dataset = datasets.MNIST('../data', train=True, download=True,
+    train_dataset_no_aug = datasets.MNIST('./data', train=True, download=True,
                 transform=transforms.Compose([       # Data preprocessing
                     transforms.ToTensor(),           # Add data augmentation here
                     transforms.Normalize((0.1307,), (0.3081,))
                 ]))
+    # train_dataset_with_aug = datasets.MNIST('./data', train=True, download=True,
+    #             transform=transforms.Compose([       # Data preprocessing
+    #                 transforms.ToTensor(),           # Add data augmentation here
+    #                 transforms.Normalize((0.1307,), (0.3081,))
+    #             ]))
+    # train_dataset_with_aug = datasets.MNIST('./data', train=True, download=True,
+    #             transform=transforms.Compose([       # Data preprocessing
+    #                 transforms.RandomRotation((-45, 45)),
+    #                 transforms.ToTensor(),           # Add data augmentation here
+    #                 transforms.Normalize((0.1307,), (0.3081,))
+    #             ]))
+    # train_dataset_with_aug = datasets.MNIST('./data', train=True, download=True,
+    #             transform=transforms.Compose([       # Data preprocessing
+    #                 transforms.RandomVerticalFlip(p=0.5),
+    #                 transforms.ToTensor(),           # Add data augmentation here
+    #                 transforms.Normalize((0.1307,), (0.3081,))
+    #             ]))
+    train_dataset_with_aug = datasets.MNIST('./data', train=True, download=True,
+                transform=transforms.Compose([       # Data preprocessing
+                    transforms.ColorJitter(1,1,1,0.5),
+                    transforms.ToTensor(),           # Add data augmentation here
+                    transforms.Normalize((0.1307,), (0.3081,))
+                ]))
+    assert(len(train_dataset_no_aug) == len(train_dataset_with_aug))
 
     # You can assign indices for training/validation or use a random subset for
     # training by using SubsetRandomSampler. Right now the train and validation
     # sets are built from the same indices - this is bad! Change it so that
     # the training and validation sets are disjoint and have the correct relative sizes.
-    subset_indices_train = range(len(train_dataset))
-    subset_indices_valid = range(len(train_dataset))
+    np.random.seed(args.seed)
+    subset_indices_train = []
+    subset_indices_valid = []
+    for target in range(10):
+        idx = (train_dataset_no_aug.targets == target).nonzero() # indices for each class
+        idx = idx.numpy().flatten()
+        val_idx = np.random.choice( len(idx), int(0.15*len(idx)), replace=False )
+        val_idx = np.ndarray.tolist(val_idx.flatten())
+        train_idx = [i for i in range(len(idx)) if i not in val_idx]
+        subset_indices_train += np.ndarray.tolist(idx[train_idx])
+        subset_indices_valid += np.ndarray.tolist(idx[val_idx])
+
+    assert (len(subset_indices_train) + len(subset_indices_valid)) == len(train_dataset_no_aug)
+    assert len(np.intersect1d(subset_indices_train,subset_indices_valid)) == 0
 
     train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size,
+        train_dataset_with_aug, batch_size=args.batch_size,
         sampler=SubsetRandomSampler(subset_indices_train)
     )
     val_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size,
+        train_dataset_no_aug, batch_size=args.batch_size,
         sampler=SubsetRandomSampler(subset_indices_valid)
     )
 
+    # print(len(train_loader), len(val_loader))
+    # print(train_loader)
+    # print(val_loader)
+
     # Load your model [fcNet, ConvNet, Net]
-    model = fcNet().to(device)
+    model = ConvNet().to(device)
 
     # Try different optimzers here [Adam, SGD, RMSprop]
     optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
