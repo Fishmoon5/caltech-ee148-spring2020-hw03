@@ -8,6 +8,9 @@ from torchvision import datasets, transforms
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data.sampler import SubsetRandomSampler
 import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix, pairwise_distances
+from sklearn.manifold import TSNE
 
 import os
 
@@ -77,6 +80,22 @@ class ConvNet(nn.Module):
         output = F.log_softmax(x, dim=1)
         return output
 
+    def forward_before_last_layer(self, x):
+        x = self.conv1(x)
+        x = F.relu(x)
+        x = F.max_pool2d(x, 2)
+        x = self.dropout1(x)
+
+        x = self.conv2(x)
+        x = F.relu(x)
+        x = F.max_pool2d(x, 2)
+        x = self.dropout2(x)
+
+        x = torch.flatten(x, 1)
+        x = self.fc1(x)
+        x = F.relu(x)
+        return x
+
 
 class Net(nn.Module):
     '''
@@ -86,6 +105,9 @@ class Net(nn.Module):
         super(Net, self).__init__()
 
     def forward(self, x):
+        return x
+
+    def forward_before_last_layer(self,x):
         return x
 
 
@@ -105,27 +127,125 @@ def train(args, model, device, train_loader, optimizer, epoch):
         if batch_idx % args.log_interval == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                 # epoch, batch_idx * len(data), len(train_loader.dataset),
-                epoch, batch_idx * len(data), len(train_loader) * len(data),
-                100. * batch_idx / len(train_loader), loss.item()))
+                # 100. * batch_idx / len(train_loader), loss.item()))
+                epoch, batch_idx * len(data), len(train_loader.sampler),
+                100. * batch_idx * len(data) / len(train_loader.sampler), loss.item()))
 
 
-def test(model, device, test_loader):
+def test(model, device, test_loader, analysis=False):
+    '''
+    If analysis is True, we generate figures as Task 8 asks.
+    '''
     model.eval()    # Set the model to inference mode
+
+    # Calculate the accuracy and present examples that predictions are incorrect
     test_loss = 0
     correct = 0
+    all_pred = np.array([])
+    all_target = np.array([])
+    all_vector = np.array([]).reshape(0,64) ### 64 is determined by last layer
     with torch.no_grad():   # For the inference step, gradient is not computed
+        count = 0
+        if analysis:
+            fig, axs = plt.subplots(3, 3)
+            fig.suptitle("9 examples from the test set where my classifier made a mistake")
+
         for data, target in test_loader:
+            images = data
             data, target = data.to(device), target.to(device)
             output = model(data)
+            output_bf = model.forward_before_last_layer(data)
             test_loss += F.nll_loss(output, target, reduction='sum').item()  # sum up batch loss
             pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
             correct += pred.eq(target.view_as(pred)).sum().item()
 
-    test_loss /= len(test_loader.dataset)
+            if analysis:
+                if device == torch.device("cuda"):
+                    pred = pred.cpu()
+                    target = target.cpu()
+                    output_bf = output_bf.cpu()
+                pred = pred.numpy().flatten()
+                target = target.numpy().flatten()
+                output_bf = output_bf.numpy()
+                all_pred = np.concatenate([all_pred, pred])
+                all_target = np.concatenate([all_target, target])
+                all_vector = np.concatenate([all_vector, output_bf])
+                incorrect_idx = np.argwhere(pred != target).flatten()
+                while count < 9 and len(incorrect_idx) > 0:
+                    axs[int(count/3), count%3].imshow(images.numpy()[incorrect_idx[0]].reshape(28,28), cmap="gray")
+                    axs[int(count/3), count%3].set_title(
+                        "Prediction={} label={}".format(pred[incorrect_idx[0]], target[incorrect_idx[0]]),
+                        fontsize='medium')
+                    count += 1
+                    incorrect_idx = incorrect_idx[1:]
 
+    # Replace .dataset by .sampler
+    test_loss /= len(test_loader.sampler)
     print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
-        test_loss, correct, len(test_loader.dataset),
-        100. * correct / len(test_loader.dataset)))
+        test_loss, correct, len(test_loader.sampler),
+        100. * correct / len(test_loader.sampler)))
+
+
+    if analysis:
+        # Visualize kernels in the first layer
+        fig, axs = plt.subplots(3, 3)
+        fig.suptitle("9 learned kernels from the first layer of my network")
+        layer1 = model.conv1 ### First layer
+        kernel_size = (layer1.weight.shape[-2], layer1.weight.shape[-1])
+        for i in range(min(9, layer1.weight.shape[0])):
+            kernel = layer1.weight[i]
+            if device == torch.device("cuda"):
+                kernel = kernel.cpu()
+            kernel = kernel.detach().numpy().reshape(kernel_size)
+            # axs[int(i/3), i%3].imshow(kernel, cmap='gray')
+            axs[int(i/3), i%3].imshow(kernel)
+
+        # Print the confusion matrix
+        c_mtx = confusion_matrix(all_target, all_pred)
+        print("Confusion matrix is: \n", c_mtx)
+
+        # Generate embedding in 2D
+        fig, ax = plt.subplots()
+        output_embedded = TSNE(n_components=2).fit_transform(all_vector)
+        for i in range(10):
+            idx = np.argwhere(all_target == i)
+            ax.scatter(output_embedded[idx,0], output_embedded[idx,1], s=10)
+        ax.legend(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"])
+        ax.set_title("Embedding of the test set in 2D")
+
+        # Randomly pick 4 images and find 8 images with closest feature vectors
+        num = 4
+        fig, axs = plt.subplots(num, 9)
+        i0_idx = np.random.choice(len(all_vector), num)
+        dists = pairwise_distances(all_vector, all_vector)
+        for i in range(num):
+            im = test_loader.dataset[i0_idx[i]][0]
+            axs[i, 0].imshow(im.numpy().reshape(28,28))
+
+            dist = dists[i0_idx[i],:]
+            print(dist.shape)
+            idx = np.argpartition(dist, [0,9])[1:9]
+            print(dist[idx], "\n")
+
+            for j in range(len(idx)):
+                im = test_loader.dataset[idx[j]][0]
+                axs[i, j+1].imshow(im.numpy().reshape(28,28))
+        # for i in range(num):
+        #     im = test_loader.dataset[i0_idx[i]][0]
+        #     axs[i, 0].imshow(im.numpy().reshape(28,28))
+        #
+        #     dist = np.linalg.norm(all_vector - all_vector[i0_idx[i],:], axis=1)
+        #     print(dist.shape)
+        #     idx = np.argpartition(dist, [0,9])[1:9]
+        #     print(dist[idx], "\n")
+        #
+        #     for j in range(len(idx)):
+        #         im = test_loader.dataset[idx[j]][0]
+        #         axs[i, j+1].imshow(im.numpy().reshape(28,28))
+        fig.suptitle("Four randomly chosen images and images with cloest feature vectors to them")
+        # "Each row has 9 images: I0, and eight images (I1, ..., I8) with cloest feature vectors.")
+
+        plt.show()
 
 
 def main():
@@ -172,7 +292,7 @@ def main():
         assert os.path.exists(args.load_model)
 
         # Set the test model
-        model = fcNet().to(device)
+        model = ConvNet().to(device)
         model.load_state_dict(torch.load(args.load_model))
 
         test_dataset = datasets.MNIST('./data', train=False,
@@ -184,7 +304,7 @@ def main():
         test_loader = torch.utils.data.DataLoader(
             test_dataset, batch_size=args.test_batch_size, shuffle=True, **kwargs)
 
-        test(model, device, test_loader)
+        test(model, device, test_loader, analysis=True)
 
         return
 
