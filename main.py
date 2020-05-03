@@ -142,17 +142,20 @@ def train(args, model, device, train_loader, optimizer, epoch):
     trained for 1 epoch.
     '''
     model.train()   # Set the model to training mode
+    train_loss = 0
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()               # Clear the gradient
         output = model(data)                # Make predictions
         loss = F.nll_loss(output, target)   # Compute loss
         loss.backward()                     # Gradient computation
+        train_loss += loss.item()
         optimizer.step()                    # Perform a single optimization step
         if batch_idx % args.log_interval == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
                 epoch, batch_idx * len(data), len(train_loader.sampler),
                 100. * batch_idx * len(data) / len(train_loader.sampler), loss.item()))
+    return train_loss / len(train_loader.sampler)
 
 
 def validation(model, device, test_loader):
@@ -174,6 +177,7 @@ def validation(model, device, test_loader):
     print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
         test_loss, correct, test_num,
         100. * correct / test_num))
+    return test_loss
 
 
 def test(model, device, test_loader, analysis=False):
@@ -248,8 +252,8 @@ def test(model, device, test_loader, analysis=False):
             if device == torch.device("cuda"):
                 kernel = kernel.cpu()
             kernel = kernel.detach().numpy().reshape(kernel_size)
-            # axs[int(i/3), i%3].imshow(kernel, cmap='gray')
-            axs[int(i/3), i%3].imshow(kernel)
+            axs[int(i/3), i%3].imshow(kernel, cmap='gray')
+            # axs[int(i/3), i%3].imshow(kernel)
 
         # Print the confusion matrix
         c_mtx = confusion_matrix(all_target, all_pred)
@@ -314,6 +318,10 @@ def main():
 
     parser.add_argument('--save-model', action='store_true', default=True,
                         help='For Saving the current Model')
+
+    parser.add_argument('--test-datasize', action='store_true', default=False,
+                        help='train on different sizes of dataset')
+
     args = parser.parse_args()
     use_cuda = not args.no_cuda and torch.cuda.is_available()
 
@@ -356,8 +364,8 @@ def main():
                     # transforms.RandomVerticalFlip(p=0.5),
                     # transforms.ColorJitter(1,1,1,0.5),
                     # transforms.RandomHorizontalFlip(),
-                    # transforms.RandomGrayscale(p=1.0),
-                    transforms.Grayscale(1),
+                    transforms.RandomGrayscale(p=0.8),
+                    # transforms.Grayscale(1),
                     # transforms.RandomCrop(28, padding=4, pad_if_needed=True),
                     # transforms.RandomResizedCrop(28),
                     transforms.ToTensor(),           # Add data augmentation here
@@ -404,13 +412,60 @@ def main():
     # Set your learning rate scheduler
     scheduler = StepLR(optimizer, step_size=args.step, gamma=args.gamma)
 
-    # Training loop
-    for epoch in range(1, args.epochs + 1):
-        train(args, model, device, train_loader, optimizer, epoch)
-        validation(model, device, val_loader)
-        scheduler.step()    # learning rate scheduler
+    if args.test_datasize:
+        train_final_loss = []
+        val_final_loss = []
+        train_size = []
+        for i in [1, 2, 4, 8, 16]:
+            print("Dataset with size 1/{} of original: ".format(i))
+            subset_indices_train_sub = np.random.choice(subset_indices_train, int(len(subset_indices_train)/i), replace=False)
+            train_loader_sub = torch.utils.data.DataLoader(
+                train_dataset_with_aug, batch_size=args.batch_size,
+                sampler=SubsetRandomSampler(subset_indices_train_sub)
+            )
+            train_losses = []
+            val_losses = []
+            for epoch in range(1, args.epochs + 1):
+                train_loss = train(args, model, device, train_loader_sub, optimizer, epoch)
+                val_loss = validation(model, device, val_loader)
+                train_losses.append(train_loss)
+                val_losses.append(val_loss)
+                scheduler.step()    # learning rate scheduler
+                # You may optionally save your model at each epoch here
+            print("Train Loss: ", train_losses)
+            print("Test Loss: ", val_losses)
+            print("\n")
+            train_final_loss.append(train_losses[-1])
+            val_final_loss.append(val_losses[-1])
+            train_size.append(int(len(subset_indices_train)/i))
 
+        plt.loglog(range(1, args.epochs + 1), train_losses)
+        plt.loglog(range(1, args.epochs + 1), val_losses)
+        plt.xlabel("Number of training examples")
+        plt.ylabel("Loss")
+        plt.legend(["Training loss", "Val loss"])
+        plt.title("Training loss and val loss as a function of the number of training examples on log-log scale")
+        plt.show()
+        return
+
+    # Training loop
+    train_losses = []
+    val_losses = []
+    for epoch in range(1, args.epochs + 1):
+        train_loss = train(args, model, device, train_loader, optimizer, epoch)
+        val_loss = validation(model, device, val_loader)
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+        scheduler.step()    # learning rate scheduler
         # You may optionally save your model at each epoch here
+
+    plt.plot(range(1, args.epochs + 1), train_losses)
+    plt.plot(range(1, args.epochs + 1), val_losses)
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend(["Training loss", "Val loss"])
+    plt.title("Training loss and val loss as a function of the epoch")
+    plt.show()
 
     if args.save_model:
         torch.save(model.state_dict(), "mnist_model.pt")
