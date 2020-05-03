@@ -11,7 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix, pairwise_distances
 from sklearn.manifold import TSNE
-
+from torchsummary import summary
 import os
 
 '''
@@ -103,11 +103,36 @@ class Net(nn.Module):
     '''
     def __init__(self):
         super(Net, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels=1, out_channels=32, kernel_size=(3,3), stride=1)
+        # self.conv2 = nn.Conv2d(8, 8, 3, 1)
+        self.dropout1 = nn.Dropout2d(0.5)
+        # self.dropout2 = nn.Dropout2d(0.5)
+        self.fc1 = nn.Linear(4*1352, 512) # 1 layer: 1352; 2 layer: 200; 3 layer: 8
+        self.fc2 = nn.Linear(512, 10)
 
     def forward(self, x):
-        return x
+        x = self.conv1(x)
+        x = F.relu(x)
+        x = F.max_pool2d(x, 2)
+        x = self.dropout1(x)
 
-    def forward_before_last_layer(self,x):
+        x = torch.flatten(x, 1)
+        x = self.fc1(x)
+        x = F.relu(x)
+        x = self.fc2(x)
+
+        output = F.log_softmax(x, dim=1)
+        return output
+
+    def forward_before_last_layer(self, x):
+        x = self.conv1(x)
+        x = F.relu(x)
+        x = F.max_pool2d(x, 2)
+        x = self.dropout1(x)
+
+        x = torch.flatten(x, 1)
+        x = self.fc1(x)
+        x = F.relu(x)
         return x
 
 
@@ -126,10 +151,29 @@ def train(args, model, device, train_loader, optimizer, epoch):
         optimizer.step()                    # Perform a single optimization step
         if batch_idx % args.log_interval == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                # epoch, batch_idx * len(data), len(train_loader.dataset),
-                # 100. * batch_idx / len(train_loader), loss.item()))
                 epoch, batch_idx * len(data), len(train_loader.sampler),
                 100. * batch_idx * len(data) / len(train_loader.sampler), loss.item()))
+
+
+def validation(model, device, test_loader):
+    model.eval()    # Set the model to inference mode
+    test_loss = 0
+    correct = 0
+    test_num = 0
+    with torch.no_grad():   # For the inference step, gradient is not computed
+        for data, target in test_loader:
+            data, target = data.to(device), target.to(device)
+            output = model(data)
+            test_loss += F.nll_loss(output, target, reduction='sum').item()  # sum up batch loss
+            pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
+            correct += pred.eq(target.view_as(pred)).sum().item()
+            test_num += len(data)
+
+    test_loss /= test_num
+
+    print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
+        test_loss, correct, test_num,
+        100. * correct / test_num))
 
 
 def test(model, device, test_loader, analysis=False):
@@ -141,9 +185,11 @@ def test(model, device, test_loader, analysis=False):
     # Calculate the accuracy and present examples that predictions are incorrect
     test_loss = 0
     correct = 0
+    test_num = 0
     all_pred = np.array([])
     all_target = np.array([])
-    all_vector = np.array([]).reshape(0,64) ### 64 is determined by last layer
+    all_vector = np.array([]).reshape(0,512) ### 64 is determined by last layer
+    all_image = np.array([]).reshape(0, 28, 28)
     with torch.no_grad():   # For the inference step, gradient is not computed
         count = 0
         if analysis:
@@ -158,18 +204,22 @@ def test(model, device, test_loader, analysis=False):
             test_loss += F.nll_loss(output, target, reduction='sum').item()  # sum up batch loss
             pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
             correct += pred.eq(target.view_as(pred)).sum().item()
+            test_num += len(data)
 
             if analysis:
                 if device == torch.device("cuda"):
                     pred = pred.cpu()
                     target = target.cpu()
                     output_bf = output_bf.cpu()
+                    data = data.cpu()
                 pred = pred.numpy().flatten()
                 target = target.numpy().flatten()
                 output_bf = output_bf.numpy()
+                data = data.numpy().reshape(len(data), 28, 28)
                 all_pred = np.concatenate([all_pred, pred])
                 all_target = np.concatenate([all_target, target])
                 all_vector = np.concatenate([all_vector, output_bf])
+                all_image = np.concatenate([all_image, data])
                 incorrect_idx = np.argwhere(pred != target).flatten()
                 while count < 9 and len(incorrect_idx) > 0:
                     axs[int(count/3), count%3].imshow(images.numpy()[incorrect_idx[0]].reshape(28,28), cmap="gray")
@@ -182,9 +232,10 @@ def test(model, device, test_loader, analysis=False):
     # Replace .dataset by .sampler
     test_loss /= len(test_loader.sampler)
     print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
-        test_loss, correct, len(test_loader.sampler),
-        100. * correct / len(test_loader.sampler)))
-
+        # test_loss, correct, len(test_loader.sampler),
+        # 100. * correct / len(test_loader.sampler)))
+        test_loss, correct, test_num,
+        100. * correct / test_num))
 
     if analysis:
         # Visualize kernels in the first layer
@@ -215,34 +266,19 @@ def test(model, device, test_loader, analysis=False):
 
         # Randomly pick 4 images and find 8 images with closest feature vectors
         num = 4
-        fig, axs = plt.subplots(num, 9)
-        i0_idx = np.random.choice(len(all_vector), num)
+        figg, axss = plt.subplots(num, 9)
+        # i0_idx = np.random.choice(len(all_vector), num)
+        i0_idx = [29, 256, 178, 396]
         dists = pairwise_distances(all_vector, all_vector)
         for i in range(num):
-            im = test_loader.dataset[i0_idx[i]][0]
-            axs[i, 0].imshow(im.numpy().reshape(28,28))
-
+            axss[i, 0].imshow(all_image[i0_idx[i],:].reshape(28,28))
             dist = dists[i0_idx[i],:]
-            print(dist.shape)
             idx = np.argpartition(dist, [0,9])[1:9]
-            print(dist[idx], "\n")
 
             for j in range(len(idx)):
-                im = test_loader.dataset[idx[j]][0]
-                axs[i, j+1].imshow(im.numpy().reshape(28,28))
-        # for i in range(num):
-        #     im = test_loader.dataset[i0_idx[i]][0]
-        #     axs[i, 0].imshow(im.numpy().reshape(28,28))
-        #
-        #     dist = np.linalg.norm(all_vector - all_vector[i0_idx[i],:], axis=1)
-        #     print(dist.shape)
-        #     idx = np.argpartition(dist, [0,9])[1:9]
-        #     print(dist[idx], "\n")
-        #
-        #     for j in range(len(idx)):
-        #         im = test_loader.dataset[idx[j]][0]
-        #         axs[i, j+1].imshow(im.numpy().reshape(28,28))
-        fig.suptitle("Four randomly chosen images and images with cloest feature vectors to them")
+                axss[i, j+1].imshow(all_image[idx[j],:].reshape(28,28))
+
+        figg.suptitle("Four randomly chosen images and images with cloest feature vectors to them")
         # "Each row has 9 images: I0, and eight images (I1, ..., I8) with cloest feature vectors.")
 
         plt.show()
@@ -292,7 +328,7 @@ def main():
         assert os.path.exists(args.load_model)
 
         # Set the test model
-        model = ConvNet().to(device)
+        model = Net().to(device)
         model.load_state_dict(torch.load(args.load_model))
 
         test_dataset = datasets.MNIST('./data', train=False,
@@ -314,26 +350,16 @@ def main():
                     transforms.ToTensor(),           # Add data augmentation here
                     transforms.Normalize((0.1307,), (0.3081,))
                 ]))
-    # train_dataset_with_aug = datasets.MNIST('./data', train=True, download=True,
-    #             transform=transforms.Compose([       # Data preprocessing
-    #                 transforms.ToTensor(),           # Add data augmentation here
-    #                 transforms.Normalize((0.1307,), (0.3081,))
-    #             ]))
-    # train_dataset_with_aug = datasets.MNIST('./data', train=True, download=True,
-    #             transform=transforms.Compose([       # Data preprocessing
-    #                 transforms.RandomRotation((-45, 45)),
-    #                 transforms.ToTensor(),           # Add data augmentation here
-    #                 transforms.Normalize((0.1307,), (0.3081,))
-    #             ]))
-    # train_dataset_with_aug = datasets.MNIST('./data', train=True, download=True,
-    #             transform=transforms.Compose([       # Data preprocessing
-    #                 transforms.RandomVerticalFlip(p=0.5),
-    #                 transforms.ToTensor(),           # Add data augmentation here
-    #                 transforms.Normalize((0.1307,), (0.3081,))
-    #             ]))
     train_dataset_with_aug = datasets.MNIST('./data', train=True, download=True,
                 transform=transforms.Compose([       # Data preprocessing
-                    transforms.ColorJitter(1,1,1,0.5),
+                    # transforms.RandomRotation((-45, 45)),
+                    # transforms.RandomVerticalFlip(p=0.5),
+                    # transforms.ColorJitter(1,1,1,0.5),
+                    # transforms.RandomHorizontalFlip(),
+                    # transforms.RandomGrayscale(p=1.0),
+                    transforms.Grayscale(1),
+                    # transforms.RandomCrop(28, padding=4, pad_if_needed=True),
+                    # transforms.RandomResizedCrop(28),
                     transforms.ToTensor(),           # Add data augmentation here
                     transforms.Normalize((0.1307,), (0.3081,))
                 ]))
@@ -363,16 +389,14 @@ def main():
         sampler=SubsetRandomSampler(subset_indices_train)
     )
     val_loader = torch.utils.data.DataLoader(
-        train_dataset_no_aug, batch_size=args.batch_size,
+        train_dataset_no_aug, batch_size=args.test_batch_size,
         sampler=SubsetRandomSampler(subset_indices_valid)
     )
 
-    # print(len(train_loader), len(val_loader))
-    # print(train_loader)
-    # print(val_loader)
 
     # Load your model [fcNet, ConvNet, Net]
-    model = ConvNet().to(device)
+    model = Net().to(device)
+    summary(model, (1,28,28))
 
     # Try different optimzers here [Adam, SGD, RMSprop]
     optimizer = optim.Adadelta(model.parameters(), lr=args.lr)
@@ -383,7 +407,7 @@ def main():
     # Training loop
     for epoch in range(1, args.epochs + 1):
         train(args, model, device, train_loader, optimizer, epoch)
-        test(model, device, val_loader)
+        validation(model, device, val_loader)
         scheduler.step()    # learning rate scheduler
 
         # You may optionally save your model at each epoch here
